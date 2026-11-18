@@ -12,9 +12,16 @@ from stream apps but does not copy any particular platform's branding.
 
 ## Install
 
-1. Copy this folder into `ComfyUI/custom_nodes/` (so you have
-   `ComfyUI/custom_nodes/comfyui-livestream-overlay/__init__.py`).
-2. Restart ComfyUI.
+From ComfyUI's `custom_nodes` folder:
+
+```
+git clone https://github.com/RebelKeithy/comfyui-livestream-overlay.git
+```
+
+Then restart ComfyUI. To update later, run `git pull` inside the
+`comfyui-livestream-overlay` folder and restart again.
+
+ComfyUI-Manager's "Install via Git URL" works with the same address.
 
 There is nothing to `pip install`: it only needs Pillow, numpy and torch, which
 ComfyUI already ships with. Pillow 10.1 or newer is recommended.
