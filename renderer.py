@@ -412,9 +412,14 @@ class OverlayRenderer:
         self.mobile = cfg.layout != "desktop"
         self._sprites = {}
         self._small = {}
+        self._patch_cache = {}
+        self._chat_cache = (None, None)
+        self._terms = {}
+        self._static_blend = None
         self._viewers = self._viewer_series()
         self._hearts, self._heart_t0 = [], []
         self.fade_mask = None
+        self._fade_col, self._fade_h = None, 0
         if self.mobile:
             self._setup_mobile(avatar)
         else:
@@ -426,26 +431,170 @@ class OverlayRenderer:
         """Overlay at time ``t`` (seconds) as an RGBA image of ``self.out_size``."""
         img = self._static.copy()
         comp(img, self._chat_layer(t), self.chat_x, self.chat_y)
-        if self.mobile:
-            x, y, _, _ = self._viewer_box
-            comp(img, self._viewer_pill(compact_count(self.viewers_at(t))), x, y)
-            self._draw_hearts(img, t)
-        else:
-            self._draw_desktop_dynamic(img, t)
+        for sprite, x, y, opacity, _ in self._sprites_at(t):
+            comp(img, sprite, x, y, opacity)
         return img
 
+    # Fast path. The overlay splits into a static layer (scrims, pills, panel) that is
+    # identical on every frame, and a few small moving pieces (chat, counters, hearts).
+    # The static layer is blended once over the whole batch; per frame only the small
+    # rectangles that actually change are touched.
+
+    def static_blend(self):
+        """Static layer as blend terms: ``out = frame * inv + premult``.
+
+        Returns ``(inv [H,W,3], premult [H,W,3], bands)`` as float32, where ``bands`` lists
+        the ``(row0, row1, col0, col1)`` rectangles in which the layer is not fully
+        transparent - everything outside them can be left alone.
+        """
+        if self._static_blend is None:
+            rgba = np.asarray(self._static, dtype=np.float32)
+            alpha = rgba[..., 3:4] / 255.0
+            mask = rgba[..., 3] > 0
+            width = mask.shape[1]
+            first = mask.argmax(axis=1) // 32 * 32
+            last = np.minimum(width, -(-(width - mask[:, ::-1].argmax(axis=1)) // 32) * 32)
+            bands, start, prev = [], None, None
+            for r in np.flatnonzero(mask.any(axis=1)).tolist():
+                if start is not None and (r != prev + 1 or first[r] != first[start] or last[r] != last[start]):
+                    bands.append((start, prev + 1, int(first[start]), int(last[start])))
+                    start = None
+                if start is None:
+                    start = r
+                prev = r
+            if start is not None:
+                bands.append((start, prev + 1, int(first[start]), int(last[start])))
+            # Three-channel terms: numpy and torch are far quicker multiplying arrays of
+            # the same shape than broadcasting a single alpha channel across RGB.
+            alpha = np.repeat(alpha, 3, axis=2)
+            self._static_blend = (1.0 - alpha, rgba[..., :3] * alpha * (1.0 / 255.0), bands)
+        return self._static_blend
+
+    def _patch(self, img: Image.Image, x, y, opacity: float = 1.0):
+        """Crop an RGBA sprite to its visible part and turn it into blend terms."""
+        x, y = int(round(x)), int(round(y))
+        box = img.getchannel("A").getbbox()
+        if box is None or opacity <= 0:
+            return None
+        out_w, out_h = self.out_size
+        x0, y0 = max(0, x + box[0]), max(0, y + box[1])
+        x1, y1 = min(out_w, x + box[2]), min(out_h, y + box[3])
+        if x1 <= x0 or y1 <= y0:
+            return None
+        rgba = np.asarray(img.crop((x0 - x, y0 - y, x1 - x, y1 - y)), dtype=np.float32)
+        alpha = np.repeat(rgba[..., 3:4], 3, axis=2) * (opacity / 255.0)
+        return (x0, y0, 1.0 - alpha, rgba[..., :3] * alpha * (1.0 / 255.0))
+
+    def _sprite_terms(self, i: int):
+        """Blend terms ``(inv, premult)`` for message ``i``, kept for the few messages on screen."""
+        terms = self._terms.get(i)
+        if terms is None:
+            rgba = np.asarray(self._sprite(i), dtype=np.float32)
+            alpha = np.repeat(rgba[..., 3:4], 3, axis=2) * (1.0 / 255.0)
+            terms = (1.0 - alpha, rgba[..., :3] * alpha * (1.0 / 255.0))
+            if len(self._terms) >= 48:  # only recent messages are visible; drop the oldest
+                self._terms.pop(next(iter(self._terms)))
+            self._terms[i] = terms
+        return terms
+
+    def _chat_patches(self, t: float):
+        """Same layout as ``_chat_layer`` but as per-message blend terms, so a frame only
+        costs two array operations per visible message instead of building an image."""
+        patches = []
+        y = float(self.chat_h)
+        for i in range(bisect.bisect_right(self.times, t) - 1, -1, -1):
+            height = self._sprite(i).height
+            e = _ease((t - self.times[i]) / self.anim) if self.anim > 0 else 1.0
+            y -= (height + self.gap) * e
+            if y + height <= 0:
+                break
+            top = int(round(y))
+            r0, r1 = max(0, -top), min(height, self.chat_h - top)  # rows inside the chat area
+            if e <= 0 or r1 <= r0:
+                continue
+            inv, premult = self._sprite_terms(i)
+            inv, premult = inv[r0:r1, : self.chat_w], premult[r0:r1, : self.chat_w]
+            row = top + r0
+            factor = e if e < 1 else None  # still fading in
+            if self._fade_col is not None and row < self._fade_h:  # inside the top fade-out
+                factor = self._fade_col[row:row + (r1 - r0)] * e
+            if factor is not None:
+                inv, premult = inv * factor + (1.0 - factor), premult * factor
+            patches.append((self.chat_x, self.chat_y + row, inv, premult))
+        return patches
+
+    def patches(self, t: float):
+        """The moving parts of the overlay at time ``t`` as ``(x, y, inv, premult)`` tuples."""
+        shown = bisect.bisect_right(self.times, t)
+        # Once the newest message has finished sliding in, the chat does not change
+        # until the next one arrives, so its patches can be reused.
+        settled = shown == 0 or self.anim <= 0 or t - self.times[shown - 1] >= self.anim
+        if settled and self._chat_cache[0] == shown:
+            chat = self._chat_cache[1]
+        else:
+            chat = self._chat_patches(t)
+            if settled:
+                self._chat_cache = (shown, chat)
+        result = list(chat)
+        for sprite, x, y, opacity, key in self._sprites_at(t):
+            if key is None:
+                patch = self._patch(sprite, x, y, opacity)
+            else:
+                if key not in self._patch_cache:
+                    if len(self._patch_cache) > 4000:
+                        self._patch_cache.clear()
+                    self._patch_cache[key] = self._patch(sprite, x, y, opacity)
+                patch = self._patch_cache[key]
+            if patch is not None:
+                result.append(patch)
+        return result
+
+    def blend_patches(self, frame: np.ndarray, t: float) -> None:
+        """Draw the moving parts for time ``t`` into ``frame`` in place.
+
+        ``frame`` is float32 [H, W, 3] of ``self.out_size`` with the static layer already
+        applied.
+        """
+        frame_h, frame_w = frame.shape[:2]
+        for x, y, inv, premult in self.patches(t):
+            h, w = inv.shape[:2]
+            if x < 0 or y < 0 or x + w > frame_w or y + h > frame_h:  # clip to the frame
+                x0, y0, x1, y1 = max(0, x), max(0, y), min(frame_w, x + w), min(frame_h, y + h)
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                inv = inv[y0 - y:y1 - y, x0 - x:x1 - x]
+                premult = premult[y0 - y:y1 - y, x0 - x:x1 - x]
+                x, y, h, w = x0, y0, y1 - y0, x1 - x0
+            region = frame[y:y + h, x:x + w]
+            region *= inv
+            region += premult
+
     def composite(self, frame: np.ndarray, t: float) -> np.ndarray:
-        """Blend the overlay onto ``frame`` (float HxWx3+, 0..1). Returns float32 HxWx3."""
-        overlay = np.asarray(self.render(t), dtype=np.float32) / 255.0
-        alpha = overlay[..., 3:4]
+        """Blend the overlay onto one ``frame`` (float HxWx3+, 0..1). Returns float32 HxWx3."""
         out_w, out_h = self.out_size
         frame = np.asarray(frame, dtype=np.float32)[..., :3]
         if (out_w, out_h) != (self.W, self.H):
-            base = np.zeros((out_h, out_w, 3), dtype=np.float32)
-            base[: self.H, : self.W] = frame
+            canvas = np.zeros((out_h, out_w, 3), dtype=np.float32)
+            canvas[: self.H, : self.W] = frame
         else:
-            base = frame
-        return base * (1.0 - alpha) + overlay[..., :3] * alpha
+            canvas = np.array(frame, dtype=np.float32)
+        inv, premult, bands = self.static_blend()
+        for r0, r1, c0, c1 in bands:
+            region = canvas[r0:r1, c0:c1]
+            region *= inv[r0:r1, c0:c1]
+            region += premult[r0:r1, c0:c1]
+        self.blend_patches(canvas, t)
+        return canvas
+
+    def _sprites_at(self, t: float):
+        """Small moving sprites as (image, x, y, opacity, cache_key or None)."""
+        if self.mobile:
+            x, y, _, _ = self._viewer_box
+            text = compact_count(self.viewers_at(t))
+            yield self._viewer_pill(text), x, y, 1.0, ("viewers", text)
+            yield from self._heart_sprites(t)
+        else:
+            yield from self._desktop_sprites(t)
 
     def viewers_at(self, t: float) -> int:
         return self._viewers[min(len(self._viewers) - 1, max(0, int(t / 3.0)))]
@@ -659,6 +808,9 @@ class OverlayRenderer:
         fade_h = max(1, round(self.chat_h * 0.22))
         self.fade_mask = Image.new("L", (self.chat_w, self.chat_h), 255)
         self.fade_mask.paste(Image.linear_gradient("L").resize((self.chat_w, fade_h)), (0, 0))
+        # the same fade as a per-row factor, for the fast path
+        self._fade_col = np.asarray(self.fade_mask, dtype=np.float32)[:, :1, None] / 255.0
+        self._fade_h = fade_h
 
         # --- floating hearts rise from the heart button
         self._heart_origin = (heart_x + bar_h / 2, bar_y - 6 * u)
@@ -746,7 +898,7 @@ class OverlayRenderer:
         hearts.sort(key=lambda h: h.t0)
         self._hearts, self._heart_t0 = hearts, [h.t0 for h in hearts]
 
-    def _draw_hearts(self, img, t: float):
+    def _heart_sprites(self, t: float):
         x0, y0 = self._heart_origin
         lo = bisect.bisect_left(self._heart_t0, t - 3.5)
         hi = bisect.bisect_right(self._heart_t0, t)
@@ -759,7 +911,10 @@ class OverlayRenderer:
             pop = min(1.0, a / 0.07)
             size = max(2, round(self._heart_px * heart.size * (0.4 + 0.6 * pop)))
             alpha = 1.0 if a < 0.5 else (1 - a) / 0.5
-            comp(img, tint(shape_mask("heart", size), heart.color), x - size / 2, y - size / 2, alpha * 0.95)
+            key = ("heart", heart.color, size)
+            if key not in self._small:
+                self._small[key] = tint(shape_mask("heart", size), heart.color)
+            yield self._small[key], x - size / 2, y - size / 2, alpha * 0.95, None
 
     # ----------------------------------------------------------------- desktop layout
 
@@ -831,7 +986,7 @@ class OverlayRenderer:
                 draw_text(base, tx, ay + av / 2, name or title, f_name, WHITE, "lm")
         self._static = base
 
-    def _draw_desktop_dynamic(self, img, t: float):
+    def _desktop_sprites(self, t: float):
         u = self.u
         # viewer count, right-aligned in the panel header
         text = f"{self.viewers_at(t):,}"
@@ -846,7 +1001,7 @@ class OverlayRenderer:
             self._small[key] = sprite
         sprite = self._small[key]
         right, mid = self._header
-        comp(img, sprite, right - sprite.width, mid - sprite.height / 2)
+        yield sprite, right - sprite.width, mid - sprite.height / 2, 1.0, key
 
         # stream uptime next to the LIVE badge
         total = int(self.cfg.uptime_minutes * 60 + t)
@@ -860,7 +1015,7 @@ class OverlayRenderer:
             if len(self._small) > 4000:
                 self._small.clear()
             self._small[key] = pill
-        comp(img, self._small[key], self._uptime_box[0], self._uptime_box[1])
+        yield self._small[key], self._uptime_box[0], self._uptime_box[1], 1.0, key
 
     def _sprite_desktop(self, ev) -> Image.Image:
         u, fs = self.u, self.fs

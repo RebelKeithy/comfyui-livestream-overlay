@@ -171,10 +171,12 @@ python preview.py --comments examples/chat.txt --layout desktop --size 1280x720 
 
 ## Notes
 
-- Speed is roughly 40-60 ms per 1080p frame on CPU. Frames are processed one at a
-  time, so memory use is the input batch plus the output batch. The Video node decodes
-  the whole clip into memory first, as ComfyUI's own video nodes do, so very long
-  videos are better handled in chunks with `start_time`.
+- The parts of the interface that never change (scrims, pills, the panel) are blended
+  into the whole batch in one pass; per frame only the small areas that move (chat,
+  counters, hearts) are redrawn. Most of the remaining time is writing the output
+  frames. Memory use is the input batch plus the output batch.
+- The Video node decodes the whole clip into memory first, as ComfyUI's own video
+  nodes do, so very long videos are better handled in chunks with `start_time`.
 - `extend canvas` changes the output width (by 340 px at 720p, scaled with height and
   `ui_scale`). The panel width is always even, so the result stays encoder-friendly
   if your source width is.

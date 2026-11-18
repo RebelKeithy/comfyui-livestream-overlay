@@ -107,14 +107,62 @@ def render_overlay(images, fps, comments, comment_format, layout, desktop_panel,
     )
     renderer = OverlayRenderer(width, height, events, config,
                                end_time=start_time + count / fps, avatar=avatar_img)
-    out_w, out_h = renderer.out_size
-    out = torch.empty((count, out_h, out_w, 3), dtype=torch.float32)
+    # 1) Allocate the output and write the frames plus the unchanging part of the UI
+    #    (scrims, pills, panel) for the whole batch at once.
+    out = _static_pass(images, renderer)
+
+    # 2) The moving parts (chat, counters, hearts): small in-place patches per frame.
+    #    The numpy array shares memory with the tensor, so nothing is copied back.
+    frames = out.numpy()
     progress = ProgressBar(count) if ProgressBar else None
     for i in range(count):
-        frame = images[i].cpu().numpy()
-        out[i] = torch.from_numpy(renderer.composite(frame, start_time + i / fps))
-        if progress:
-            progress.update(1)
+        renderer.blend_patches(frames[i], start_time + i / fps)
+        if progress and (i % 16 == 15 or i == count - 1):
+            progress.update_absolute(i + 1, count)
+    return out
+
+
+def _static_pass(images, renderer):
+    """Build the output batch: every frame with the static UI layer blended in.
+
+    Done region by region so each output pixel is written exactly once: areas the layer
+    does not touch are plain copies, the rest is ``frame * inv + premult`` in one step.
+    The input batch is never modified (ComfyUI caches upstream outputs).
+    """
+    count, width = images.shape[0], images.shape[2]
+    out_w, out_h = renderer.out_size
+    src = images[..., :3]
+    if src.device.type != "cpu" or src.dtype != torch.float32:
+        src = src.to(device="cpu", dtype=torch.float32)
+    inv, premult, bands = renderer.static_blend()
+    inv, premult = torch.from_numpy(inv), torch.from_numpy(premult)
+    out = torch.empty((count, out_h, out_w, 3), dtype=torch.float32)
+
+    def plain(r0, r1, c0, c1):
+        """Frame pixels unchanged; black where the canvas extends past the frame."""
+        if r1 <= r0:
+            return
+        if c0 < min(c1, width):
+            out[:, r0:r1, c0:min(c1, width)] = src[:, r0:r1, c0:min(c1, width)]
+        if max(c0, width) < c1:
+            out[:, r0:r1, max(c0, width):c1] = 0.0
+
+    def blended(r0, r1, c0, c1):
+        a, b = c0, min(c1, width)
+        if a < b:
+            torch.addcmul(premult[r0:r1, a:b], src[:, r0:r1, a:b], inv[r0:r1, a:b], out=out[:, r0:r1, a:b])
+        a, b = max(c0, width), c1
+        if a < b:  # past the frame there is nothing underneath the layer
+            out[:, r0:r1, a:b] = premult[r0:r1, a:b]
+
+    row = 0
+    for r0, r1, c0, c1 in bands:  # sorted by row, never overlapping
+        plain(row, r0, 0, out_w)
+        plain(r0, r1, 0, c0)
+        blended(r0, r1, c0, c1)
+        plain(r0, r1, c1, out_w)
+        row = r1
+    plain(row, out_h, 0, out_w)
     return out
 
 
