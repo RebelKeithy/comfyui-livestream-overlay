@@ -1,7 +1,6 @@
 # ComfyUI Livestream Overlay
 
-A ComfyUI custom node that composites a livestream interface onto a batch of video
-frames: a scrolling chat driven by a timed comment script, a LIVE badge, a drifting
+ComfyUI custom nodes that composite a livestream interface onto a video: a scrolling chat driven by a timed comment script, a LIVE badge, a drifting
 viewer count, floating heart reactions, and join / follow / tip events.
 
 The overlay is drawn in code (Pillow), so text is always sharp and legible and the
@@ -26,23 +25,39 @@ ComfyUI-Manager's "Install via Git URL" works with the same address.
 There is nothing to `pip install`: it only needs Pillow, numpy and torch, which
 ComfyUI already ships with. Pillow 10.1 or newer is recommended.
 
-The node appears as **Livestream Overlay (chat + UI)** under `video/livestream`.
+## Nodes
 
-## Wiring
+Both are under `video/livestream` and have the same settings.
+
+**Livestream Overlay (Video)** takes a `VIDEO` and returns a `VIDEO`. The frame rate
+and audio track come from the input and are passed through, so there is no `fps` to
+set:
 
 ```
-your frames (IMAGE batch) ──► Livestream Overlay ──► Video Combine / Save
+Load Video ──► Livestream Overlay (Video) ──► Save Video
 ```
 
-Set `fps` to the same frame rate you pass to your video-combine node. Frame `i` is
-drawn at `start_time + i / fps` seconds on the comment timeline.
+It needs a ComfyUI version that has the `VIDEO` type (the one Load Video, Create Video
+and Save Video use). The output is a standard 8-bit sRGB video.
+
+**Livestream Overlay (Images)** takes and returns an `IMAGE` batch, for workflows that
+pass frames around (a sampler's decoded output, or VideoHelperSuite's Load Video and
+Video Combine):
+
+```
+frames (IMAGE batch) ──► Livestream Overlay (Images) ──► Video Combine
+```
+
+Set its `fps` to the frame rate you give your video-combine node.
+
+In both, frame `i` is drawn at `start_time + i / fps` seconds on the comment timeline.
 
 ## Inputs
 
 | Input | What it does |
 |---|---|
-| `images` | Frames to draw on. |
-| `fps` | Frame rate of the video. |
+| `video` | Video node only: the video to draw on. |
+| `images`, `fps` | Images node only: the frames to draw on and their frame rate. |
 | `comments` | The comment script (see formats below). |
 | `comment_format` | `auto` detects JSON, then SRT, otherwise chat-log lines. |
 | `layout` | `mobile`: chat floats over the bottom-left of the video, with hearts. `desktop`: chat in a side panel. |
@@ -157,7 +172,9 @@ python preview.py --comments examples/chat.txt --layout desktop --size 1280x720 
 ## Notes
 
 - Speed is roughly 40-60 ms per 1080p frame on CPU. Frames are processed one at a
-  time, so memory use is the input batch plus the output batch.
+  time, so memory use is the input batch plus the output batch. The Video node decodes
+  the whole clip into memory first, as ComfyUI's own video nodes do, so very long
+  videos are better handled in chunks with `start_time`.
 - `extend canvas` changes the output width (by 340 px at 720p, scaled with height and
   `ui_scale`). The panel width is always even, so the result stays encoder-friendly
   if your source width is.
