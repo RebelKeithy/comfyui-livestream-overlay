@@ -15,15 +15,21 @@ In the two text formats a comment is written ``username: message``. Extras:
 * ``[system] any text``            neutral system line
 
 A comment with no ``username:`` prefix gets a generated username (stable per seed).
+
+The script can also carry node settings, so whatever writes the script (a person or an
+LLM) can control the overlay through the text alone. In the text formats they are
+header lines such as ``# viewer_count: 1300``; in JSON, a top-level ``"settings"``
+object. See ``parse_settings``.
 """
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 from dataclasses import dataclass, field
 
-__all__ = ["ChatEvent", "parse_comments", "parse_time"]
+__all__ = ["ChatEvent", "parse_comments", "parse_settings", "parse_time", "SETTINGS"]
 
 
 @dataclass
@@ -203,6 +209,104 @@ def detect_format(text: str) -> str:
         except ValueError:
             pass
     return "srt" if _SRT_CUE.search(text) else "lines"
+
+
+# ---------------------------------------------------------------------------- settings
+
+def _number(lo, hi, integer=False):
+    def convert(raw):
+        s = str(raw).strip().lower().replace(",", "").replace("_", "")
+        scale = 1.0
+        if s[-1:] in ("k", "m"):
+            scale, s = (1e3 if s[-1] == "k" else 1e6), s[:-1]
+        value = float(s) * scale
+        if not math.isfinite(value):
+            raise ValueError("not a finite number")
+        value = min(hi, max(lo, value))
+        return int(round(value)) if integer else value
+    return convert
+
+
+def _choice(options: dict):
+    def convert(raw):
+        return options[str(raw).strip().lower()]  # KeyError -> rejected
+    return convert
+
+
+def _text(raw):
+    return str(raw).strip().strip("\"'").strip()[:80]
+
+
+def _hex_color(raw):
+    s = str(raw).strip().lower()
+    if not re.fullmatch(r"#?(?:[0-9a-f]{3}|[0-9a-f]{6})", s):
+        raise ValueError("not a hex colour")
+    return "#" + s.lstrip("#")
+
+
+# Settings a script may carry: name -> converter. Names match the node's inputs.
+SETTINGS = {
+    "streamer_name": _text,
+    "stream_title": _text,
+    "viewer_count": _number(1, 50_000_000, integer=True),
+    "layout": _choice({"mobile": "mobile", "desktop": "desktop"}),
+    "desktop_panel": _choice({"extend": "extend canvas", "extend canvas": "extend canvas",
+                              "overlay": "overlay video", "overlay video": "overlay video"}),
+    "accent_color": _hex_color,
+    "reaction_rate": _number(0.0, 30.0),
+    "ui_scale": _number(0.4, 3.0),
+    "chat_bg_opacity": _number(0.0, 1.0),
+    "uptime_minutes": _number(0.0, 6000.0),
+    "seed": _number(0, 0xFFFFFFFFFFFFFFFF, integer=True),
+}
+_SETTING_ALIASES = {
+    "streamer": "streamer_name", "title": "stream_title", "viewers": "viewer_count",
+    "accent": "accent_color", "reactions": "reaction_rate", "chat_bg": "chat_bg_opacity",
+    "uptime": "uptime_minutes", "panel": "desktop_panel", "scale": "ui_scale",
+}
+_SETTING_LINE = re.compile(r"^\s*#\s*([A-Za-z][A-Za-z _-]*?)\s*[:=]\s*(.*?)\s*$")
+
+
+def parse_settings(text: str, fmt: str = "auto"):
+    """Read node settings embedded in a comment script.
+
+    Text formats: header lines ``# name: value`` (or ``# name = value``).
+    JSON: ``{"settings": {"name": value, ...}, "comments": [...]}``.
+
+    Returns ``(settings, rejected)``. ``settings`` maps node input names to converted,
+    range-clamped values. ``rejected`` lists ``(name, raw_value)`` pairs whose value
+    could not be used. ``#`` lines that do not name a known setting are ordinary
+    comments and are ignored silently.
+    """
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    if fmt not in ("srt", "lines", "json"):
+        fmt = detect_format(text) if text.strip() else "lines"
+    raw = []
+    if fmt == "json":
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        block = data.get("settings") if isinstance(data, dict) else None
+        if isinstance(block, dict):
+            raw = list(block.items())
+    else:
+        for line in text.splitlines():
+            m = _SETTING_LINE.match(line)
+            if m:
+                raw.append((m.group(1), m.group(2)))
+
+    settings, rejected = {}, []
+    for name, value in raw:
+        key = re.sub(r"[\s-]+", "_", str(name).strip().lower())
+        key = _SETTING_ALIASES.get(key, key)
+        if key not in SETTINGS or value is None or str(value).strip() == "":
+            continue
+        try:
+            settings[key] = SETTINGS[key](value)
+        except (ValueError, KeyError, IndexError):
+            rejected.append((key, str(value)))
+    return settings, rejected
 
 
 def parse_comments(text: str, fmt: str = "auto", seed: int = 0,

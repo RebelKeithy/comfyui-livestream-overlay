@@ -1,8 +1,10 @@
 # Agent guide: writing a chat script for the Livestream Overlay node
 
-You are writing the viewer chat for a simulated livestream. Your output is pasted
-into the `comments` input of a ComfyUI node that draws it over a video, so it must
-parse exactly. Write nothing but the script: no introduction, no code fence.
+You are writing the viewer chat for a simulated livestream. Your output is fed
+straight into the `comments` input of a ComfyUI node that draws it over a video, so it
+must parse exactly. Your text is the only thing the node receives from you: the
+settings header at the top of the script is how you choose the streamer name, layout,
+colours and the rest. Write nothing but the script: no introduction, no code fence.
 
 ## What you need first
 
@@ -12,6 +14,7 @@ Ask for anything missing that you can't reasonably infer:
 - What happens on screen and when (a rough timeline is enough).
 - Who the streamer is, what kind of stream it is, and the tone of the audience.
 - Approximate viewer count, and the language the audience writes in.
+- Whether the video is portrait or landscape (this decides the layout).
 
 ## Output format
 
@@ -27,7 +30,8 @@ m:ss.s username: message
 - **Username**: 3-20 characters, no spaces, none of `: [ ] |`. The colon comes
   directly after it, then a space.
 - **Message**: a single line. No line breaks.
-- Lines starting with `#` are ignored by the node. Use them only for the header below.
+- Lines starting with `#` never appear in the chat. Use them only for the settings
+  header below.
 
 Special lines:
 
@@ -39,17 +43,28 @@ Special lines:
 | `0:09.0 quietmango: [tip $5] love this` | Highlighted tip. The message is optional. |
 | `0:12.0 [system] Slow mode is on.` | System notice, no username. |
 
-Start the script with a header suggesting the node's other settings:
+## Settings header
 
-```
-# streamer_name: maya.makes
-# stream_title: Sunday studio hangout
-# viewer_count: 1300
-```
+Start the script with `# name: value` lines. The node applies them, overriding
+whatever is set on the node itself. A line with an invalid value is ignored.
+
+| Setting | Value | How to choose |
+|---|---|---|
+| `streamer_name` | text | The streamer's handle. |
+| `stream_title` | text, under 50 characters | What a streamer would title this stream. |
+| `viewer_count` | whole number | Must fit the chat volume you write (see below). |
+| `layout` | `mobile` or `desktop` | `mobile` for portrait video: chat floats over the picture, with hearts. `desktop` for landscape: chat in a side panel. |
+| `accent_color` | hex, e.g. `#2f9e8f` | Colour of buttons and tip cards. Pick one that suits the stream; avoid very pale colours. |
+| `reaction_rate` | 0 to 30 | Floating hearts per second (mobile). About 0.5 is quiet, 2 is normal, 5 or more is a hyped crowd. |
+| `uptime_minutes` | number | How long the stream has been live when the clip starts. |
+
+Always set the first four. Three more exist; set them only when asked to:
+`ui_scale` (0.4 to 3, size of the whole interface), `chat_bg_opacity` (0 to 1, dark
+bubble behind each message) and `desktop_panel` (`extend` or `overlay`).
 
 ## Rules that keep it parseable
 
-1. Every line is a header line or starts with a timestamp. No blank-line tricks, no
+1. Every line is a settings line or starts with a timestamp. No blank-line tricks, no
    bullets, no numbering.
 2. Give every comment a username. Without one, the first word is taken as the
    username whenever it ends in a colon.
@@ -86,13 +101,17 @@ Start the script with a header suggesting the node's other settings:
 
 ## Example
 
-Brief: 12 s clip, a painter reveals a finished canvas at 0:05, about 1,300 viewers,
-relaxed art stream.
+Brief: 12 s portrait clip, a painter reveals a finished canvas at 0:05, about 1,300
+viewers, relaxed art stream.
 
 ```
 # streamer_name: maya.makes
 # stream_title: Sunday studio hangout
 # viewer_count: 1300
+# layout: mobile
+# accent_color: #2f9e8f
+# reaction_rate: 3
+# uptime_minutes: 62
 -0:06.5 inkfinch: the blue is doing so much work here
 -0:05.1 nightowl[mod]: reminder: commissions open friday
 -0:03.8 pebble_jo: just got here what did i miss
@@ -115,7 +134,9 @@ relaxed art stream.
 
 ## Check before you answer
 
-- Every non-header line starts with a timestamp and has `username: ` after it.
+- The header sets `streamer_name`, `stream_title`, `viewer_count` and `layout`, and
+  every value is one the table allows.
+- Every other line starts with a timestamp and has `username: ` after it.
 - No timestamp is later than the video length.
 - Reactions come after the moments they react to.
 - Nothing but the script is in your reply.

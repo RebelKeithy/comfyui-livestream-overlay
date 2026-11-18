@@ -72,6 +72,7 @@ In both, frame `i` is drawn at `start_time + i / fps` seconds on the comment tim
 | `seed` | Controls generated usernames, auto-timing jitter, hearts and viewer drift. Same seed = same result, including across chunks. |
 | `avatar` (optional) | Streamer profile picture. Without it, a coloured circle with the initial is used. |
 | `comments_file` (optional) | Path to a `.srt` / `.txt` / `.json` file. Overrides the text box when set. |
+| `script_settings` (optional) | `apply` (default): settings written in the comment script override the inputs above. `ignore`: only the node's own inputs count. |
 | `chat_bg_opacity` (optional) | Mobile layout: how dark the bubble behind each message is. `0` (default) is text only with a soft shadow for legibility; `0.45` gives a dark translucent bubble; `1` is solid. Tip cards keep their accent colour. |
 
 ## Comment formats
@@ -131,6 +132,40 @@ nightowl[mod]: welcome in everyone
 
 Keys: `time` (seconds or a `m:ss` string), `user`, `text`, `type`
 (`chat`, `join`, `follow`, `tip`, `system`), `color`, `badges`, `amount`.
+
+### Settings in the script
+
+The script can set the node's options itself. This matters when the script comes from
+another node (an LLM, a text file loader): that text is then the only thing connected,
+and it can still choose the name, layout and look.
+
+In SRT and chat-log scripts, add header lines:
+
+```
+# streamer_name: maya.makes
+# stream_title: Sunday studio hangout
+# viewer_count: 1300
+# layout: mobile
+# accent_color: #2f9e8f
+0:01 pixel_otter: first!!
+```
+
+In JSON, use an object with a `settings` block:
+
+```json
+{"settings": {"streamer_name": "maya.makes", "layout": "desktop"},
+ "comments": [{"time": 1, "user": "pixel_otter", "text": "first!!"}]}
+```
+
+Settings that can be written this way: `streamer_name`, `stream_title`,
+`viewer_count`, `layout` (`mobile` / `desktop`), `desktop_panel` (`extend` /
+`overlay`), `accent_color`, `reaction_rate`, `ui_scale`, `chat_bg_opacity`,
+`uptime_minutes` and `seed`.
+
+A setting in the script overrides the matching input on the node. Numbers are clamped
+to the input's range; a value that makes no sense is skipped and reported in the
+ComfyUI console, and the node's own input is used. Other `#` lines stay plain
+comments. Set `script_settings` to `ignore` to turn all of this off.
 
 Working examples of all three are in `examples/`. To have an LLM write the script for
 you, give it `AGENT_GUIDE.md` together with a description of your video.

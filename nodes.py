@@ -7,19 +7,22 @@ Two nodes share one implementation:
 """
 from __future__ import annotations
 
+import logging
 import os
 
 import numpy as np
 import torch
 from PIL import Image
 
-from .chat_parser import parse_comments
+from .chat_parser import parse_comments, parse_settings
 from .renderer import OverlayConfig, OverlayRenderer
 
 try:
     from comfy.utils import ProgressBar
 except Exception:  # running outside ComfyUI
     ProgressBar = None
+
+log = logging.getLogger(__name__)
 
 DEFAULT_COMMENTS = """\
 # One comment per line: "time user: message". Timestamps are optional.
@@ -42,7 +45,7 @@ def _option_inputs():
     """Widgets shared by both nodes, in display order."""
     return {
         "comments": ("STRING", {"multiline": True, "default": DEFAULT_COMMENTS,
-                                "tooltip": "Comment script: SRT, chat-log lines or JSON."}),
+                                "tooltip": "Comment script: SRT, chat-log lines or JSON. Header lines such as '# viewer_count: 1300' set the node's options from the script."}),
         "comment_format": (["auto", "lines", "srt", "json"],),
         "layout": (["mobile", "desktop"],
                    {"tooltip": "mobile: chat floats over the video. desktop: chat in a side panel."}),
@@ -71,12 +74,15 @@ def _optional_inputs():
                                      "tooltip": "Optional path to a .srt / .txt / .json file. Overrides the text box."}),
         "chat_bg_opacity": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
                                       "tooltip": "Mobile layout: darkness of the bubble behind each message. 0 = no background (text gets a soft shadow instead), 0.45 = classic dark bubble."}),
+        "script_settings": (["apply", "ignore"],
+                            {"tooltip": "apply: settings written in the comment script (e.g. '# viewer_count: 1300') override the widgets on this node. ignore: only the widgets count."}),
     }
 
 
 def render_overlay(images, fps, comments, comment_format, layout, desktop_panel, streamer_name,
                    stream_title, viewer_count, accent_color, reaction_rate, ui_scale, start_time,
-                   uptime_minutes, seed, avatar=None, comments_file="", chat_bg_opacity=0.0):
+                   uptime_minutes, seed, avatar=None, comments_file="", chat_bg_opacity=0.0,
+                   script_settings="apply"):
     """Draw the overlay on an IMAGE batch ([N, H, W, C] floats in 0..1) and return a new batch."""
     path = (comments_file or "").strip().strip('"').strip("'")
     if path:
@@ -84,7 +90,21 @@ def render_overlay(images, fps, comments, comment_format, layout, desktop_panel,
             raise FileNotFoundError(f"Livestream Overlay: comments_file not found: {path}")
         with open(path, "r", encoding="utf-8-sig") as fh:
             comments = fh.read()
-    events = parse_comments(comments, comment_format, seed)
+
+    # Settings written into the script win over the widgets, so an LLM that only
+    # produces the script text can still choose the name, layout, colours and so on.
+    opts = dict(layout=layout, desktop_panel=desktop_panel, streamer_name=streamer_name,
+                stream_title=stream_title, viewer_count=viewer_count, accent_color=accent_color,
+                reaction_rate=reaction_rate, ui_scale=ui_scale, chat_bg_opacity=chat_bg_opacity,
+                uptime_minutes=uptime_minutes, seed=seed)
+    if script_settings != "ignore":
+        found, rejected = parse_settings(comments, comment_format)
+        opts.update(found)
+        if found:
+            log.info("Livestream Overlay: settings from script: %s", found)
+        for name, value in rejected:
+            log.warning("Livestream Overlay: ignored script setting %s: %r (not a valid value)", name, value)
+    events = parse_comments(comments, comment_format, opts["seed"])
 
     count, height, width = images.shape[0], images.shape[1], images.shape[2]
     avatar_img = None
@@ -93,17 +113,17 @@ def render_overlay(images, fps, comments, comment_format, layout, desktop_panel,
         avatar_img = Image.fromarray(pixels)
 
     config = OverlayConfig(
-        layout=layout,
-        panel_mode="overlay" if desktop_panel.startswith("overlay") else "extend",
-        streamer_name=streamer_name.strip(),
-        stream_title=stream_title.strip(),
-        viewer_count=viewer_count,
-        accent=accent_color,
-        reaction_rate=reaction_rate,
-        ui_scale=ui_scale,
-        chat_bg_opacity=chat_bg_opacity,
-        uptime_minutes=uptime_minutes,
-        seed=seed,
+        layout=opts["layout"],
+        panel_mode="overlay" if opts["desktop_panel"].startswith("overlay") else "extend",
+        streamer_name=opts["streamer_name"].strip(),
+        stream_title=opts["stream_title"].strip(),
+        viewer_count=opts["viewer_count"],
+        accent=opts["accent_color"],
+        reaction_rate=opts["reaction_rate"],
+        ui_scale=opts["ui_scale"],
+        chat_bg_opacity=opts["chat_bg_opacity"],
+        uptime_minutes=opts["uptime_minutes"],
+        seed=opts["seed"],
     )
     renderer = OverlayRenderer(width, height, events, config,
                                end_time=start_time + count / fps, avatar=avatar_img)
