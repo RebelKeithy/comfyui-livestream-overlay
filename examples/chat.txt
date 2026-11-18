@@ -1,0 +1,15 @@
+# Chat-log format. One comment per line; lines starting with # are ignored.
+# Any of these timestamp styles work:  0:05   [0:05]   00:00:05.250   5.25 |
+0:00.6 pixel_otter: first!! 🔥
+0:01.4 maplefan22: [join]
+[0:02.1] nightowl[mod]: welcome in everyone, be nice in chat
+0:03.3 | sam_k | where are you streaming from today?
+4.2 | LunaBee[sub] | this looks amazing 😍😍
+0:05 quietmango: [tip $5.00] coffee is on me ☕
+
+# No timestamp: the comment is placed automatically ~1.6 s after the previous one.
+turbo_yeti: can you show that last part again?
+dana.w: [follow]
+# No username: a random one is generated (stable for a given seed).
+lol same 😂
+[system] Slow mode is on.

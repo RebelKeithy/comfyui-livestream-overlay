@@ -1,0 +1,10 @@
+[
+  {"time": 0.6, "user": "pixel_otter", "text": "first!! 🔥"},
+  {"time": 1.4, "user": "maplefan22", "type": "join"},
+  {"time": 2.1, "user": "nightowl", "badges": ["mod"], "text": "welcome in everyone, be nice in chat"},
+  {"time": "0:03.3", "user": "sam_k", "text": "where are you streaming from today?", "color": "#ffd166"},
+  {"time": 4.2, "user": "LunaBee", "badges": ["sub"], "text": "this looks amazing 😍😍"},
+  {"time": 5.0, "user": "quietmango", "type": "tip", "amount": "$5.00", "text": "coffee is on me ☕"},
+  {"time": 6.9, "user": "dana.w", "type": "follow"},
+  {"time": 9.3, "type": "system", "text": "Slow mode is on."}
+]
